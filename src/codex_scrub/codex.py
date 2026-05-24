@@ -9,27 +9,21 @@ from datetime import UTC, datetime
 from glob import escape as glob_escape
 from pathlib import Path
 
+from codex_scrub.cleanup import delete_thread_artifacts, scrub_sqlite_files
+from codex_scrub.storage import (
+    is_filelike,
+    path_candidates,
+    quote_identifier,
+    sqlite_columns,
+    sqlite_home,
+    state_db_paths,
+    write_text_atomically,
+)
+
 SESSION_INDEX = "session_index.jsonl"
 HISTORY = "history.jsonl"
 EPOCH = datetime.fromtimestamp(0, UTC)
 
-STATE_DELETE_TABLES = (
-    ("thread_dynamic_tools", "thread_id"),
-    ("thread_spawn_edges", "parent_thread_id"),
-    ("thread_spawn_edges", "child_thread_id"),
-    ("stage1_outputs", "thread_id"),
-    ("threads", "id"),
-)
-STATE_CLEAR_TABLES = (("agent_job_items", "assigned_thread_id"),)
-GOAL_DELETE_TABLES = (("thread_goals", "thread_id"),)
-LOG_DELETE_TABLES = (("logs", "thread_id"),)
-APP_DELETE_TABLES = (("automation_runs", "thread_id"), ("inbox_items", "thread_id"))
-SQLITE_SCRUB_TARGETS = (
-    ("state_*.sqlite", STATE_DELETE_TABLES, STATE_CLEAR_TABLES),
-    ("goals_*.sqlite", GOAL_DELETE_TABLES, ()),
-    ("logs_*.sqlite", LOG_DELETE_TABLES, ()),
-    ("sqlite/*.db", APP_DELETE_TABLES, ()),
-)
 STATE_THREAD_COLUMNS = (
     "id",
     "title",
@@ -39,6 +33,7 @@ STATE_THREAD_COLUMNS = (
     "thread_source",
     "source",
     "archived",
+    "archived_at",
 )
 RELATED_THREAD_COLUMNS = ("id", "thread_source", "source", "rollout_path")
 
@@ -95,30 +90,27 @@ def default_codex_home() -> Path:
 
 def load_threads(codex_home: Path | None = None) -> list[CodexThread]:
     home = _codex_home(codex_home)
-    state_threads = _load_state_thread_map(home)
-    threads = {
-        thread.id: replace(
-            thread,
-            is_archived=bool(state_thread and state_thread.thread.is_archived),
-            source=state_thread.thread.source if state_thread else thread.source,
+    state_threads = _load_state_thread_map(sqlite_home(home))
+
+    threads: dict[str, CodexThread] = {}
+    for thread in _session_threads(home / SESSION_INDEX):
+        state_thread = state_threads.get(thread.id)
+        if state_thread and state_thread.is_subagent:
+            continue
+        threads[thread.id] = _merge_session_thread(home, thread, state_thread)
+
+    for thread_id, state_thread in state_threads.items():
+        if thread_id in threads or state_thread.is_subagent:
+            continue
+        if not _thread_has_trace_file(home, thread_id, state_thread.rollout_path):
+            continue
+
+        threads[thread_id] = replace(
+            state_thread.thread,
+            is_archived=_state_thread_is_archived(home, state_thread),
+            is_zombie=_state_only_thread_is_zombie(state_thread.thread),
         )
-        for thread in _session_threads(home / SESSION_INDEX)
-        if not (
-            (state_thread := state_threads.get(thread.id)) and state_thread.is_subagent
-        )
-    }
-    threads.update(
-        {
-            thread_id: replace(
-                state_thread.thread,
-                is_zombie=state_thread.thread.source != "cli",
-            )
-            for thread_id, state_thread in state_threads.items()
-            if thread_id not in threads
-            and not state_thread.is_subagent
-            and _thread_has_trace_file(home, thread_id, state_thread.rollout_path)
-        }
-    )
+
     return sorted(
         threads.values(), key=lambda thread: thread.local_updated_at, reverse=True
     )
@@ -140,32 +132,16 @@ def scrub_thread(thread_id: str, codex_home: Path | None = None) -> ScrubResult:
             lambda line: not _line_mentions_any_thread(line, thread_ids),
         ),
     }
+    deleted_files = tuple(delete_thread_artifacts(home, thread_ids))
     return ScrubResult(
         thread_id=thread_id,
         scrubbed_thread_ids=thread_ids,
-        deleted_files=tuple(_delete_matching_files(home, thread_ids)),
+        deleted_files=deleted_files,
         removed_jsonl_lines={
             path: count for path, count in removed_jsonl_lines.items() if count
         },
-        changed_sqlite_rows=_scrub_sqlite_files(home, thread_ids),
+        changed_sqlite_rows=scrub_sqlite_files(home, thread_ids),
     )
-
-
-def _scrub_sqlite_files(home: Path, thread_ids: Iterable[str]) -> dict[Path, int]:
-    thread_ids = tuple(thread_ids)
-    return {
-        sqlite_path: count
-        for glob_pattern, delete_rows, clear_values in SQLITE_SCRUB_TARGETS
-        for sqlite_path in sorted(home.glob(glob_pattern))
-        if (
-            count := _scrub_sqlite_rows(
-                sqlite_path,
-                delete_rows=delete_rows,
-                clear_values=clear_values,
-                thread_ids=thread_ids,
-            )
-        )
-    }
 
 
 def _codex_home(codex_home: Path | None) -> Path:
@@ -215,9 +191,9 @@ def _json_dict(line: str) -> dict[str, object]:
     return data if isinstance(data, dict) else {}
 
 
-def _load_state_thread_map(codex_home: Path) -> dict[str, _StateThread]:
+def _load_state_thread_map(db_home: Path) -> dict[str, _StateThread]:
     threads: dict[str, _StateThread] = {}
-    for sqlite_path in sorted(codex_home.glob("state_*.sqlite")):
+    for sqlite_path in state_db_paths(db_home):
         try:
             state_threads = _load_state_threads(sqlite_path)
         except (OSError, sqlite3.Error):
@@ -236,13 +212,13 @@ def _load_state_thread_map(codex_home: Path) -> dict[str, _StateThread]:
 
 def _load_state_threads(sqlite_path: Path) -> list[_StateThread]:
     with sqlite3.connect(sqlite_path, timeout=2) as connection:
-        columns = _sqlite_columns(connection, "threads")
+        columns = sqlite_columns(connection, "threads")
         if "id" not in columns:
             return []
 
         rows = connection.execute(
             f"SELECT {_select_columns(columns, STATE_THREAD_COLUMNS)} "
-            f"FROM {_quote_identifier('threads')}"
+            f"FROM {quote_identifier('threads')}"
         ).fetchall()
 
     return [
@@ -262,6 +238,7 @@ def _state_thread_from_row(row: tuple[object, ...]) -> _StateThread | None:
         thread_source,
         source,
         archived,
+        archived_at,
     ) = row
     if not isinstance(thread_id, str) or not thread_id:
         return None
@@ -272,7 +249,7 @@ def _state_thread_from_row(row: tuple[object, ...]) -> _StateThread | None:
             name=_thread_name(title),
             updated_at=_sqlite_updated_at(updated_at_ms, updated_at),
             source=_source_name(source),
-            is_archived=_sqlite_bool(archived),
+            is_archived=_is_archived(archived, archived_at),
         ),
         rollout_path=rollout_path,
         is_subagent=_is_subagent_thread(thread_source, source),
@@ -291,12 +268,36 @@ def _source_name(source: object) -> str:
     return "unknown"
 
 
+def _merge_session_thread(
+    codex_home: Path, thread: CodexThread, state_thread: _StateThread | None
+) -> CodexThread:
+    if state_thread is None:
+        return replace(thread, is_archived=_has_archived_rollout(codex_home, thread.id))
+
+    return replace(
+        thread,
+        is_archived=_state_thread_is_archived(codex_home, state_thread),
+        source=state_thread.thread.source,
+    )
+
+
+def _state_thread_is_archived(codex_home: Path, state_thread: _StateThread) -> bool:
+    return state_thread.thread.is_archived or _rollout_path_is_archived(
+        codex_home, state_thread.rollout_path
+    )
+
+
+def _state_only_thread_is_zombie(thread: CodexThread) -> bool:
+    return thread.source != "cli"
+
+
 def _related_thread_ids(codex_home: Path, thread_id: str) -> tuple[str, ...]:
     related_ids = {thread_id}
+    db_home = sqlite_home(codex_home)
 
     while True:
         discovered_ids = set(related_ids)
-        for sqlite_path in sorted(codex_home.glob("state_*.sqlite")):
+        for sqlite_path in state_db_paths(db_home):
             try:
                 discovered_ids.update(
                     _related_state_thread_ids(sqlite_path, codex_home, related_ids)
@@ -314,12 +315,12 @@ def _related_state_thread_ids(
 ) -> set[str]:
     related_ids: set[str] = set()
     with sqlite3.connect(sqlite_path, timeout=2) as connection:
-        edge_columns = _sqlite_columns(connection, "thread_spawn_edges")
+        edge_columns = sqlite_columns(connection, "thread_spawn_edges")
         if {"parent_thread_id", "child_thread_id"} <= edge_columns:
             rows = connection.execute(
-                f"SELECT {_quote_identifier('parent_thread_id')}, "
-                f"{_quote_identifier('child_thread_id')} "
-                f"FROM {_quote_identifier('thread_spawn_edges')}"
+                f"SELECT {quote_identifier('parent_thread_id')}, "
+                f"{quote_identifier('child_thread_id')} "
+                f"FROM {quote_identifier('thread_spawn_edges')}"
             ).fetchall()
             related_ids.update(
                 child_id
@@ -327,13 +328,13 @@ def _related_state_thread_ids(
                 if parent_id in parent_thread_ids and isinstance(child_id, str)
             )
 
-        columns = _sqlite_columns(connection, "threads")
+        columns = sqlite_columns(connection, "threads")
         if "id" not in columns:
             return related_ids
 
         rows = connection.execute(
             f"SELECT {_select_columns(columns, RELATED_THREAD_COLUMNS)} "
-            f"FROM {_quote_identifier('threads')}"
+            f"FROM {quote_identifier('threads')}"
         ).fetchall()
 
     return related_ids | {
@@ -363,7 +364,7 @@ def _subagent_references_parent(
     )
     return any(
         path.is_file() and _file_contains_any_marker(path, markers)
-        for path in _path_candidates(codex_home, rollout_path)
+        for path in path_candidates(codex_home, rollout_path)
     )
 
 
@@ -377,7 +378,7 @@ def _file_contains_any_marker(path: Path, markers: tuple[str, ...]) -> bool:
 
 def _select_columns(columns: set[str], names: Iterable[str]) -> str:
     return ", ".join(
-        _quote_identifier(name) if name in columns else "NULL" for name in names
+        quote_identifier(name) if name in columns else "NULL" for name in names
     )
 
 
@@ -393,6 +394,14 @@ def _sqlite_bool(value: object) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes"}
     return isinstance(value, bool | int | float) and bool(value)
+
+
+def _is_archived(archived: object, archived_at: object) -> bool:
+    return _sqlite_bool(archived) or _sqlite_present(archived_at)
+
+
+def _sqlite_present(value: object) -> bool:
+    return value is not None and value != ""
 
 
 def _parse_epoch_datetime(value: object, *, milliseconds: bool) -> datetime | None:
@@ -416,20 +425,31 @@ def _parse_epoch_datetime(value: object, *, milliseconds: bool) -> datetime | No
 def _thread_has_trace_file(
     codex_home: Path, thread_id: str, rollout_path: object
 ) -> bool:
-    if any(_is_filelike(path) for path in _path_candidates(codex_home, rollout_path)):
+    if any(is_filelike(path) for path in path_candidates(codex_home, rollout_path)):
         return True
 
     return any(
-        _is_filelike(path)
-        for path in (codex_home / "sessions").rglob(f"*{glob_escape(thread_id)}*")
+        is_filelike(path)
+        for directory in ("sessions", "archived_sessions")
+        for path in (codex_home / directory).rglob(f"*{glob_escape(thread_id)}*")
     )
 
 
-def _path_candidates(codex_home: Path, value: object) -> tuple[Path, ...]:
-    if not isinstance(value, str) or not value:
-        return ()
-    path = Path(value).expanduser()
-    return (path,) if path.is_absolute() else (codex_home / path, path)
+def _has_archived_rollout(codex_home: Path, thread_id: str) -> bool:
+    return any(
+        is_filelike(path)
+        for path in (codex_home / "archived_sessions").rglob(
+            f"*{glob_escape(thread_id)}*"
+        )
+    )
+
+
+def _rollout_path_is_archived(codex_home: Path, rollout_path: object) -> bool:
+    archived_dir = codex_home / "archived_sessions"
+    return any(
+        path == archived_dir or archived_dir in path.parents
+        for path in path_candidates(codex_home, rollout_path)
+    )
 
 
 def _rewrite_jsonl(path: Path, keep_line: Callable[[str], bool]) -> int:
@@ -440,14 +460,8 @@ def _rewrite_jsonl(path: Path, keep_line: Callable[[str], bool]) -> int:
     kept_lines = [line for line in lines if keep_line(line)]
     removed_count = len(lines) - len(kept_lines)
     if removed_count:
-        _write_text_atomically(path, "".join(kept_lines))
+        write_text_atomically(path, "".join(kept_lines))
     return removed_count
-
-
-def _write_text_atomically(path: Path, content: str) -> None:
-    temporary_path = path.with_name(f".{path.name}.tmp")
-    temporary_path.write_text(content, encoding="utf-8")
-    temporary_path.replace(path)
 
 
 def _session_index_line_matches_any(line: str, thread_ids: Iterable[str]) -> bool:
@@ -456,77 +470,3 @@ def _session_index_line_matches_any(line: str, thread_ids: Iterable[str]) -> boo
 
 def _line_mentions_any_thread(line: str, thread_ids: Iterable[str]) -> bool:
     return any(thread_id in line for thread_id in thread_ids)
-
-
-def _scrub_sqlite_rows(
-    path: Path,
-    *,
-    delete_rows: tuple[tuple[str, str], ...],
-    clear_values: tuple[tuple[str, str], ...],
-    thread_ids: tuple[str, ...],
-) -> int:
-    if not thread_ids:
-        return 0
-
-    placeholders = ", ".join("?" for _ in thread_ids)
-    changed_rows = 0
-    with sqlite3.connect(path, timeout=2) as connection:
-        columns_by_table: dict[str, set[str]] = {}
-        for template, targets in (
-            (
-                f"DELETE FROM {{table}} WHERE {{column}} IN ({placeholders})",
-                delete_rows,
-            ),
-            (
-                f"UPDATE {{table}} SET {{column}} = NULL "
-                f"WHERE {{column}} IN ({placeholders})",
-                clear_values,
-            ),
-        ):
-            for table, column in targets:
-                if table not in columns_by_table:
-                    columns_by_table[table] = _sqlite_columns(connection, table)
-                columns = columns_by_table[table]
-                if column not in columns:
-                    continue
-
-                cursor = connection.execute(
-                    template.format(
-                        table=_quote_identifier(table),
-                        column=_quote_identifier(column),
-                    ),
-                    thread_ids,
-                )
-                changed_rows += max(cursor.rowcount, 0)
-
-    return changed_rows
-
-
-def _sqlite_columns(connection: sqlite3.Connection, table: str) -> set[str]:
-    rows = connection.execute(
-        f"PRAGMA table_info({_quote_identifier(table)})"
-    ).fetchall()
-    return {row[1] for row in rows if isinstance(row[1], str)}
-
-
-def _quote_identifier(identifier: str) -> str:
-    escaped_identifier = identifier.replace('"', '""')
-    return f'"{escaped_identifier}"'
-
-
-def _delete_matching_files(codex_home: Path, thread_ids: Iterable[str]) -> list[Path]:
-    paths = sorted(
-        {
-            path
-            for thread_id in thread_ids
-            for path in codex_home.rglob(f"*{glob_escape(thread_id)}*")
-            if _is_filelike(path)
-        }
-    )
-    for path in paths:
-        path.unlink()
-    return paths
-
-
-def _is_filelike(path: Path) -> bool:
-    return path.is_file() or path.is_symlink()

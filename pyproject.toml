@@ -4,19 +4,23 @@ version = "0.1.0"
 description = "Delete and scrub Codex app threads"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = [
-    "textual==8.2.7",
-]
+dependencies = ["textual==8.2.7"]
 
 [project.scripts]
 scrub = "codex_scrub:main"
+
+[dependency-groups]
+dev = ["ruff==0.15.14", "ty==0.0.39"]
 
 [build-system]
 requires = ["uv_build>=0.11.16,<0.12.0"]
 build-backend = "uv_build"
 
-[dependency-groups]
-dev = [
-    "ruff==0.15.14",
-    "ty==0.0.39",
-]
+[tool.ruff]
+exclude = ["codex"]
+
+[tool.ruff.lint]
+extend-select = ["I"]
+
+[tool.ty.src]
+exclude = ["codex"]
