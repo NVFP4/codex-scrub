@@ -1,13 +1,13 @@
 [project]
 name = "codex-scrub"
-version = "0.1.0"
+version = "1.0.0"
 description = "Delete and scrub Codex app threads"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = ["textual==8.2.7"]
 
 [project.scripts]
-scrub = "codex_scrub:main"
+codex-scrub = "codex_scrub:main"
 
 [dependency-groups]
 dev = ["ruff==0.15.14", "ty==0.0.39"]
