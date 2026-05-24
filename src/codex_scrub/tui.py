@@ -28,7 +28,7 @@ TITLE = "\n".join(
     )
 )
 TITLE_COMPACT = "Codex Scrub"
-TITLE_MIN_WIDTH = 65
+TITLE_MIN_WIDTH = 70
 
 
 class ThreadListItem(ListItem):
@@ -54,27 +54,61 @@ class SpacerItem(ListItem):
         super().__init__(Static(""), disabled=True)
 
 
-class ConfirmDeleteScreen(ModalScreen[bool]):
+class ConfirmDeleteScreen(ModalScreen[None]):
     BINDINGS = [
         Binding("y", "confirm", "Confirm", show=False),
         Binding("n,escape", "cancel", "Cancel", show=False),
+        Binding("space,enter", "activate", "Close", show=False),
+        Binding("up,down,j,k", "noop", "Ignore", show=False),
     ]
 
     def __init__(self, thread: CodexThread) -> None:
         super().__init__()
         self.thread = thread
+        self.is_deleting = False
+        self.is_finished = False
 
     def compose(self) -> ComposeResult:
         with Container(id="confirm-dialog"):
-            yield Static("Delete thread?", id="confirm-title")
+            yield Static("Permanently delete everything?", id="confirm-title")
             yield Static(self.thread.name, id="confirm-name")
             yield Static("y confirm   n/escape cancel", id="confirm-help")
 
-    def action_confirm(self) -> None:
-        self.dismiss(True)
+    async def action_confirm(self) -> None:
+        if self.is_deleting or self.is_finished:
+            return
+
+        app = self.app
+        assert isinstance(app, ScrubApp)
+
+        self.is_deleting = True
+        self.query_one("#confirm-title", Static).update("Deleting thread...")
+        self.query_one("#confirm-help", Static).update("")
+        success, message = await app._delete_thread(self.thread)
+        self.is_deleting = False
+        self.is_finished = True
+        self.query_one("#confirm-title", Static).update(
+            "Deleted thread" if success else "Could not delete thread"
+        )
+        self.query_one("#confirm-name", Static).update(message)
+        self.query_one("#confirm-help", Static).update("enter/space/escape close")
 
     def action_cancel(self) -> None:
-        self.dismiss(False)
+        if self.is_deleting:
+            return
+
+        if not self.is_finished:
+            app = self.app
+            assert isinstance(app, ScrubApp)
+            app._clear_confirmation()
+        self.dismiss(None)
+
+    def action_activate(self) -> None:
+        if self.is_finished:
+            self.dismiss(None)
+
+    def action_noop(self) -> None:
+        pass
 
 
 class ScrubApp(App[None]):
@@ -86,19 +120,20 @@ class ScrubApp(App[None]):
     Screen {
         background: ansi_default;
         color: ansi_default;
-        padding: 1 2;
+        padding: 1 1;
     }
 
     #title {
-        height: 6;
+        height: 5;
         padding: 0 1;
-        content-align: left middle;
+        content-align: left top;
         text-style: bold;
         background: transparent;
     }
 
     #title.compact-title {
         height: 2;
+        content-align: left middle;
     }
 
     #thread-list {
@@ -123,6 +158,12 @@ class ScrubApp(App[None]):
         height: 1;
         padding: 0 1;
         background: transparent;
+    }
+
+    .thread-row > Static {
+        width: 1fr;
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
     }
 
     #thread-list > ListItem.-hovered {
@@ -170,7 +211,6 @@ class ScrubApp(App[None]):
 
     ConfirmDeleteScreen {
         align: center middle;
-        background: transparent;
         color: ansi_default;
     }
 
@@ -254,20 +294,9 @@ class ScrubApp(App[None]):
     async def _choose_thread(self, thread: CodexThread) -> None:
         self.confirming_thread_id = thread.id
         self._mark_pending(thread.id)
-        self.push_screen(
-            ConfirmDeleteScreen(thread),
-            lambda confirmed: self._finish_delete_confirmation(thread, bool(confirmed)),
-        )
+        self.push_screen(ConfirmDeleteScreen(thread))
 
-    async def _finish_delete_confirmation(
-        self, thread: CodexThread, confirmed: bool
-    ) -> None:
-        if confirmed:
-            await self._delete_thread(thread)
-        else:
-            self._clear_confirmation()
-
-    async def _delete_thread(self, thread: CodexThread) -> None:
+    async def _delete_thread(self, thread: CodexThread) -> tuple[bool, str]:
         self.confirming_thread_id = None
         self._set_status(f"Deleting {thread.name}...")
 
@@ -275,21 +304,18 @@ class ScrubApp(App[None]):
             result = scrub_thread(thread.id, self.codex_home)
         except (OSError, sqlite3.Error, ValueError) as error:
             self._clear_confirmation(update_status=False)
-            self._set_status(f"Could not delete {thread.name}: {error}", error=True)
-            return
+            message = f"Failed deleting {thread.name}: {error}"
+            self._set_status(message, error=True)
+            return False, message
 
         await self._reload_threads(
             keep_thread_id=self._neighbor_thread_id(result.scrubbed_thread_ids)
         )
-        related_suffix = (
-            f", {result.related_thread_count} attached threads"
-            if result.related_thread_count
-            else ""
-        )
-        self._set_status(
+        self._set_status(self._thread_count_message())
+        return True, (
             f"Deleted {thread.name}: {result.file_count} files, "
             f"{result.sqlite_row_count} sqlite rows, {result.jsonl_line_count} jsonl lines"
-            f"{related_suffix}."
+            f", {result.related_thread_count} attached threads."
         )
 
     async def _reload_threads(self, keep_thread_id: str | None = None) -> None:
@@ -390,7 +416,7 @@ class ScrubApp(App[None]):
 
 def _thread_text(thread: CodexThread) -> Text:
     updated_at = thread.local_updated_at.strftime("%Y-%m-%d %H:%M")
-    text = Text()
+    text = Text(no_wrap=True, overflow="ellipsis")
     text.append(f"{updated_at}  ", style="yellow")
     text.append(f"{thread.source.upper():<3}", style="yellow")
     text.append("  ")
