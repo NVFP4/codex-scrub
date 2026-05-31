@@ -257,7 +257,15 @@ def _state_thread_from_row(row: tuple[object, ...]) -> _StateThread | None:
 
 
 def _thread_name(title: object) -> str:
-    return title if isinstance(title, str) and title else "(untitled)"
+    if not isinstance(title, str):
+        return "(untitled)"
+
+    name = next(
+        (line.strip() for line in title.splitlines() if line.strip()), "(untitled)"
+    )
+    if len(name) > 50:
+        return name[:50] + "..."
+    return name
 
 
 def _source_name(source: object) -> str:
