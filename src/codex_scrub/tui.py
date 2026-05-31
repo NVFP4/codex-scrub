@@ -56,9 +56,9 @@ class SpacerItem(ListItem):
 
 class ConfirmDeleteScreen(ModalScreen[None]):
     BINDINGS = [
-        Binding("y", "confirm", "Confirm", show=False),
+        Binding("enter", "confirm", "Confirm", show=False),
         Binding("n,escape", "cancel", "Cancel", show=False),
-        Binding("space,enter", "activate", "Close", show=False),
+        Binding("space", "activate", "Close", show=False),
         Binding("up,down,j,k", "noop", "Ignore", show=False),
     ]
 
@@ -72,9 +72,13 @@ class ConfirmDeleteScreen(ModalScreen[None]):
         with Container(id="confirm-dialog"):
             yield Static("Permanently delete everything?", id="confirm-title")
             yield Static(self.thread.name, id="confirm-name")
-            yield Static("y confirm   n/escape cancel", id="confirm-help")
+            yield Static("enter confirm   n/escape cancel", id="confirm-help")
 
     async def action_confirm(self) -> None:
+        if self.is_finished:
+            self.dismiss(None)
+            return
+
         if self.is_deleting or self.is_finished:
             return
 
@@ -243,7 +247,7 @@ class ScrubApp(App[None]):
         Binding("q", "quit", "quit"),
         Binding("j", "cursor_down", "move down", key_display="j/down"),
         Binding("k", "cursor_up", "move up", key_display="k/up"),
-        Binding("space", "select_thread", "delete", key_display="space/enter"),
+        Binding("enter", "select_thread", "delete"),
     ]
 
     def __init__(self, codex_home: Path | None = None) -> None:
@@ -432,7 +436,7 @@ def _help_text() -> Text:
         ("q", "quit"),
         ("j/down", "move down"),
         ("k/up", "move up"),
-        ("space/enter", "delete"),
+        ("enter", "delete"),
     )
     for index, (keys, label) in enumerate(shortcuts):
         if index:

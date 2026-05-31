@@ -27,6 +27,7 @@ EPOCH = datetime.fromtimestamp(0, UTC)
 STATE_THREAD_COLUMNS = (
     "id",
     "title",
+    "preview",
     "updated_at_ms",
     "updated_at",
     "rollout_path",
@@ -232,6 +233,7 @@ def _state_thread_from_row(row: tuple[object, ...]) -> _StateThread | None:
     (
         thread_id,
         title,
+        preview,
         updated_at_ms,
         updated_at,
         rollout_path,
@@ -246,7 +248,7 @@ def _state_thread_from_row(row: tuple[object, ...]) -> _StateThread | None:
     return _StateThread(
         thread=CodexThread(
             id=thread_id,
-            name=_thread_name(title),
+            name=_thread_name(title, preview),
             updated_at=_sqlite_updated_at(updated_at_ms, updated_at),
             source=_source_name(source),
             is_archived=_is_archived(archived, archived_at),
@@ -256,12 +258,16 @@ def _state_thread_from_row(row: tuple[object, ...]) -> _StateThread | None:
     )
 
 
-def _thread_name(title: object) -> str:
-    if not isinstance(title, str):
-        return "(untitled)"
-
+def _thread_name(*values: object) -> str:
     name = next(
-        (line.strip() for line in title.splitlines() if line.strip()), "(untitled)"
+        (
+            line.strip()
+            for value in values
+            if isinstance(value, str)
+            for line in value.splitlines()
+            if line.strip()
+        ),
+        "(untitled)",
     )
     if len(name) > 50:
         return name[:50] + "..."

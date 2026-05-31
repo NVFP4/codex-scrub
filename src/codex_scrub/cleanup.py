@@ -13,6 +13,7 @@ from codex_scrub.storage import (
     goals_db_paths,
     is_filelike,
     logs_db_paths,
+    memories_db_paths,
     quote_identifier,
     sqlite_columns,
     sqlite_home,
@@ -25,6 +26,8 @@ STATE_DELETE_TABLES = (
     ("thread_spawn_edges", "parent_thread_id"),
     ("thread_spawn_edges", "child_thread_id"),
     ("stage1_outputs", "thread_id"),
+    ("thread_goals", "thread_id"),
+    ("logs", "thread_id"),
     ("jobs", "job_key"),
     ("threads", "id"),
 )
@@ -34,6 +37,7 @@ STATE_CLEAR_TABLES = (
 )
 GOAL_DELETE_TABLES = (("thread_goals", "thread_id"),)
 LOG_DELETE_TABLES = (("logs", "thread_id"),)
+MEMORY_DELETE_TABLES = (("stage1_outputs", "thread_id"), ("jobs", "job_key"))
 APP_DELETE_TABLES = (("automation_runs", "thread_id"), ("inbox_items", "thread_id"))
 
 
@@ -48,6 +52,7 @@ SQLITE_HOME_SCRUB_TARGETS = (
     (state_db_paths, _SqliteScrubPlan(STATE_DELETE_TABLES, STATE_CLEAR_TABLES, True)),
     (goals_db_paths, _SqliteScrubPlan(GOAL_DELETE_TABLES)),
     (logs_db_paths, _SqliteScrubPlan(LOG_DELETE_TABLES)),
+    (memories_db_paths, _SqliteScrubPlan(MEMORY_DELETE_TABLES)),
 )
 CODEX_HOME_SCRUB_TARGETS = (("sqlite/*.db", _SqliteScrubPlan(APP_DELETE_TABLES)),)
 

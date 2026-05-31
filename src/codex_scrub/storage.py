@@ -5,7 +5,7 @@ import sqlite3
 import tomllib
 from pathlib import Path
 
-VERSIONED_DB_RE = re.compile(r"^(state|goals|logs)_\d+\.sqlite$")
+VERSIONED_DB_RE = re.compile(r"^(state|goals|logs|memories)_\d+\.sqlite$")
 
 
 def sqlite_home(codex_home: Path) -> Path:
@@ -53,6 +53,10 @@ def goals_db_paths(db_home: Path) -> tuple[Path, ...]:
 
 def logs_db_paths(db_home: Path) -> tuple[Path, ...]:
     return _versioned_db_paths(db_home, "logs")
+
+
+def memories_db_paths(db_home: Path) -> tuple[Path, ...]:
+    return _versioned_db_paths(db_home, "memories")
 
 
 def _versioned_db_paths(db_home: Path, prefix: str) -> tuple[Path, ...]:
