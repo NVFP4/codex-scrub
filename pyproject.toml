@@ -1,6 +1,6 @@
 [project]
 name = "codex-scrub"
-version = "1.1.0"
+version = "1.1.1"
 description = "Delete and scrub Codex app threads"
 readme = "README.md"
 requires-python = ">=3.12"
