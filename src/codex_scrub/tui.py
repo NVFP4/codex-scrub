@@ -146,7 +146,8 @@ class ScrubApp(App[None]):
     }
 
     .date-header,
-    .group-header {
+    .group-header,
+    .cwd-header {
         height: 1;
         padding: 0 1;
         color: ansi_bright_cyan;
@@ -156,6 +157,11 @@ class ScrubApp(App[None]):
 
     .group-header {
         background: transparent;
+    }
+
+    .cwd-header {
+        color: ansi_bright_black;
+        text-style: none;
     }
 
     .thread-row {
@@ -345,12 +351,12 @@ class ScrubApp(App[None]):
         active_threads = [thread for thread in self.threads if not thread.is_archived]
         archived_threads = [thread for thread in self.threads if thread.is_archived]
         items: list[ListItem] = [HeaderItem("Active Threads", classes="group-header")]
-        items.extend(ThreadListItem(thread) for thread in active_threads)
+        items.extend(_thread_group_items(active_threads))
         if archived_threads:
             items.extend(
                 [SpacerItem(), HeaderItem("Archived Threads", classes="group-header")]
             )
-            items.extend(ThreadListItem(thread) for thread in archived_threads)
+            items.extend(_thread_group_items(archived_threads))
         return items
 
     def _neighbor_thread_id(self, deleted_thread_ids: Iterable[str]) -> str | None:
@@ -428,6 +434,24 @@ def _thread_text(thread: CodexThread) -> Text:
     if thread.is_zombie:
         text.append("  zombie", style="yellow bold")
     return text
+
+
+def _thread_group_items(threads: list[CodexThread]) -> list[ListItem]:
+    items: list[ListItem] = []
+    groups: dict[str, list[CodexThread]] = {}
+    for thread in sorted(threads, key=lambda thread: thread.updated_at, reverse=True):
+        groups.setdefault(_cwd_group(thread), []).append(thread)
+
+    for cwd, group_threads in groups.items():
+        items.append(HeaderItem(cwd, classes="cwd-header"))
+        items.extend(ThreadListItem(thread) for thread in group_threads)
+    return items
+
+
+def _cwd_group(thread: CodexThread) -> str:
+    if not thread.cwd:
+        return "(unknown cwd)"
+    return Path(thread.cwd).expanduser().name or str(Path(thread.cwd).expanduser())
 
 
 def _help_text() -> Text:

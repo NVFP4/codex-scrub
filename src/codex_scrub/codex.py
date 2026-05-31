@@ -31,6 +31,7 @@ STATE_THREAD_COLUMNS = (
     "updated_at_ms",
     "updated_at",
     "rollout_path",
+    "cwd",
     "thread_source",
     "source",
     "archived",
@@ -44,6 +45,7 @@ class CodexThread:
     id: str
     name: str
     updated_at: datetime
+    cwd: str | None = None
     is_zombie: bool = False
     is_archived: bool = False
     source: str = "app"
@@ -167,6 +169,7 @@ def _thread_from_jsonl(line: str) -> CodexThread | None:
         id=thread_id,
         name=_thread_name(data.get("thread_name")),
         updated_at=_parse_datetime(data.get("updated_at")),
+        cwd=_thread_cwd(data.get("cwd")),
     )
 
 
@@ -237,6 +240,7 @@ def _state_thread_from_row(row: tuple[object, ...]) -> _StateThread | None:
         updated_at_ms,
         updated_at,
         rollout_path,
+        cwd,
         thread_source,
         source,
         archived,
@@ -250,6 +254,7 @@ def _state_thread_from_row(row: tuple[object, ...]) -> _StateThread | None:
             id=thread_id,
             name=_thread_name(title, preview),
             updated_at=_sqlite_updated_at(updated_at_ms, updated_at),
+            cwd=_thread_cwd(cwd),
             source=_source_name(source),
             is_archived=_is_archived(archived, archived_at),
         ),
@@ -274,6 +279,14 @@ def _thread_name(*values: object) -> str:
     return name
 
 
+def _thread_cwd(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+
+    cwd = value.strip()
+    return cwd or None
+
+
 def _source_name(source: object) -> str:
     if source == "cli":
         return "cli"
@@ -290,7 +303,9 @@ def _merge_session_thread(
 
     return replace(
         thread,
+        updated_at=state_thread.thread.updated_at,
         is_archived=_state_thread_is_archived(codex_home, state_thread),
+        cwd=thread.cwd or state_thread.thread.cwd,
         source=state_thread.thread.source,
     )
 
