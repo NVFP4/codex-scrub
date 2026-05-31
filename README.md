@@ -5,7 +5,7 @@ Delete and scrub Codex threads from disk, because OpenAI wouldn't.
 ## Usage
 
 ```sh
-uvx codex-scrub
+uvx codex-scrub@latest
 ```
 
 ## License
