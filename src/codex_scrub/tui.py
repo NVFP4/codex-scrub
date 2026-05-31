@@ -34,16 +34,23 @@ TITLE_MIN_WIDTH = 70
 class ThreadListItem(ListItem):
     def __init__(self, thread: CodexThread) -> None:
         self.thread = thread
+        self.label = Static(_thread_text(thread), markup=False)
         super().__init__(
-            Static(_thread_text(thread), markup=False),
+            self.label,
             classes="thread-row",
         )
 
+    def set_highlighted(self, highlighted: bool) -> None:
+        archived_style = "black" if highlighted else "bright_black"
+        self.label.update(_thread_text(self.thread, archived_style=archived_style))
+
 
 class HeaderItem(ListItem):
-    def __init__(self, label: str, classes: str = "date-header") -> None:
+    def __init__(self, label: str | Text, classes: str = "date-header") -> None:
+        if isinstance(label, str):
+            label = Text(label, style="bold")
         super().__init__(
-            Static(Text(label, style="bold"), markup=False),
+            Static(label, markup=False),
             classes=classes,
             disabled=True,
         )
@@ -160,7 +167,7 @@ class ScrubApp(App[None]):
     }
 
     .cwd-header {
-        color: ansi_bright_black;
+        color: ansi_cyan;
         text-style: none;
     }
 
@@ -181,7 +188,7 @@ class ScrubApp(App[None]):
     }
 
     #thread-list > ListItem.-highlight {
-        background: ansi_bright_black 45%;
+        background: ansi_bright_black 20%;
         color: $text;
         text-style: bold;
     }
@@ -191,7 +198,7 @@ class ScrubApp(App[None]):
     }
 
     #thread-list:focus > ListItem.-highlight {
-        background: ansi_bright_black 45%;
+        background: ansi_bright_black 20%;
         color: $text;
         text-style: bold;
     }
@@ -251,8 +258,10 @@ class ScrubApp(App[None]):
 
     BINDINGS = [
         Binding("q", "quit", "quit"),
-        Binding("j", "cursor_down", "move down", key_display="j/down"),
-        Binding("k", "cursor_up", "move up", key_display="k/up"),
+        Binding("down,j", "cursor_down", "move down", show=False),
+        Binding("up,k", "cursor_up", "move up", show=False),
+        Binding("right,l", "next_dir", "next dir", show=False),
+        Binding("left,h", "previous_dir", "previous dir", show=False),
         Binding("enter", "select_thread", "delete"),
     ]
 
@@ -281,6 +290,8 @@ class ScrubApp(App[None]):
             await self._choose_thread(event.item.thread)
 
     def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
+        self._refresh_thread_markers(event.item)
+
         if not self.confirming_thread_id:
             return
 
@@ -295,6 +306,12 @@ class ScrubApp(App[None]):
 
     def action_cursor_up(self) -> None:
         self.query_one("#thread-list", ListView).action_cursor_up()
+
+    def action_next_dir(self) -> None:
+        self._jump_dir(1)
+
+    def action_previous_dir(self) -> None:
+        self._jump_dir(-1)
 
     async def action_select_thread(self) -> None:
         item = self.query_one("#thread-list", ListView).highlighted_child
@@ -338,6 +355,7 @@ class ScrubApp(App[None]):
         if items:
             await thread_list.extend(items)
             thread_list.index = self._index_for_thread(items, keep_thread_id)
+            self._refresh_thread_markers(thread_list.highlighted_child)
         else:
             thread_list.index = None
 
@@ -348,16 +366,7 @@ class ScrubApp(App[None]):
             self._set_status(self._thread_count_message())
 
     def _list_items(self) -> list[ListItem]:
-        active_threads = [thread for thread in self.threads if not thread.is_archived]
-        archived_threads = [thread for thread in self.threads if thread.is_archived]
-        items: list[ListItem] = [HeaderItem("Active Threads", classes="group-header")]
-        items.extend(_thread_group_items(active_threads))
-        if archived_threads:
-            items.extend(
-                [SpacerItem(), HeaderItem("Archived Threads", classes="group-header")]
-            )
-            items.extend(_thread_group_items(archived_threads))
-        return items
+        return _thread_group_items(self.threads)
 
     def _neighbor_thread_id(self, deleted_thread_ids: Iterable[str]) -> str | None:
         deleted_thread_ids = set(deleted_thread_ids)
@@ -393,9 +402,41 @@ class ScrubApp(App[None]):
             thread_indexes[0][0] if thread_indexes else None,
         )
 
+    def _jump_dir(self, direction: int) -> None:
+        thread_list = self.query_one("#thread-list", ListView)
+        items = list(thread_list.children)
+        current_index = thread_list.index
+        if current_index is None:
+            return
+
+        group_starts = [
+            index
+            for index, item in enumerate(items)
+            if isinstance(item, ThreadListItem)
+            and (index == 0 or not isinstance(items[index - 1], ThreadListItem))
+        ]
+        if not group_starts:
+            return
+
+        current_group = max(
+            (
+                index
+                for index, start in enumerate(group_starts)
+                if start <= current_index
+            ),
+            default=0,
+        )
+        target_group = current_group + direction
+        if 0 <= target_group < len(group_starts):
+            thread_list.index = group_starts[target_group]
+
     def _mark_pending(self, thread_id: str) -> None:
         for item in self.query(ThreadListItem):
             item.set_class(item.thread.id == thread_id, "pending-delete")
+
+    def _refresh_thread_markers(self, highlighted_item: ListItem | None) -> None:
+        for item in self.query(ThreadListItem):
+            item.set_highlighted(item is highlighted_item)
 
     def _clear_confirmation(self, update_status: bool = True) -> None:
         self.confirming_thread_id = None
@@ -424,16 +465,31 @@ class ScrubApp(App[None]):
         title.set_class(compact, "compact-title")
 
 
-def _thread_text(thread: CodexThread) -> Text:
+def _thread_text(thread: CodexThread, *, archived_style: str = "bright_black") -> Text:
     updated_at = thread.local_updated_at.strftime("%Y-%m-%d %H:%M")
     text = Text(no_wrap=True, overflow="ellipsis")
     text.append(f"{updated_at}  ", style="yellow")
     text.append(f"{thread.source.upper():<3}", style="yellow")
     text.append("  ")
+    tokens = _human_tokens(thread.tokens_used) if thread.tokens_used is not None else ""
+    text.append(f"{tokens:>11}  ", style="yellow")
     text.append(thread.name, style="white bold")
+    if thread.is_archived:
+        text.append("  [archived]", style=archived_style)
     if thread.is_zombie:
         text.append("  zombie", style="yellow bold")
     return text
+
+
+def _human_tokens(tokens: int) -> str:
+    if tokens < 1_000:
+        return f"{tokens} toks"
+    if tokens < 1_000_000:
+        return f"{tokens // 1_000}K toks"
+
+    value = tokens / 1_000_000
+    formatted = f"{value:.2f}".rstrip("0").rstrip(".")
+    return f"{formatted}M toks"
 
 
 def _thread_group_items(threads: list[CodexThread]) -> list[ListItem]:
@@ -442,8 +498,10 @@ def _thread_group_items(threads: list[CodexThread]) -> list[ListItem]:
     for thread in sorted(threads, key=lambda thread: thread.updated_at, reverse=True):
         groups.setdefault(_cwd_group(thread), []).append(thread)
 
-    for cwd, group_threads in groups.items():
-        items.append(HeaderItem(cwd, classes="cwd-header"))
+    for index, (cwd, group_threads) in enumerate(groups.items()):
+        if index:
+            items.append(SpacerItem())
+        items.append(HeaderItem(_cwd_header_text(cwd), classes="cwd-header"))
         items.extend(ThreadListItem(thread) for thread in group_threads)
     return items
 
@@ -451,15 +509,23 @@ def _thread_group_items(threads: list[CodexThread]) -> list[ListItem]:
 def _cwd_group(thread: CodexThread) -> str:
     if not thread.cwd:
         return "(unknown cwd)"
-    return Path(thread.cwd).expanduser().name or str(Path(thread.cwd).expanduser())
+    return str(Path(thread.cwd).expanduser())
+
+
+def _cwd_header_text(cwd: str) -> Text:
+    path = Path(cwd)
+    dirname = path.name or cwd
+    text = Text(dirname, style="cyan")
+    text.append(f" [{cwd}]", style="bright_black")
+    return text
 
 
 def _help_text() -> Text:
     text = Text()
     shortcuts = (
         ("q", "quit"),
-        ("j/down", "move down"),
-        ("k/up", "move up"),
+        ("↑/↓", "threads"),
+        ("←/→", "projects"),
         ("enter", "delete"),
     )
     for index, (keys, label) in enumerate(shortcuts):

@@ -36,6 +36,7 @@ STATE_THREAD_COLUMNS = (
     "source",
     "archived",
     "archived_at",
+    "tokens_used",
 )
 RELATED_THREAD_COLUMNS = ("id", "thread_source", "source", "rollout_path")
 
@@ -49,6 +50,7 @@ class CodexThread:
     is_zombie: bool = False
     is_archived: bool = False
     source: str = "app"
+    tokens_used: int | None = None
 
     @property
     def local_updated_at(self) -> datetime:
@@ -245,6 +247,7 @@ def _state_thread_from_row(row: tuple[object, ...]) -> _StateThread | None:
         source,
         archived,
         archived_at,
+        tokens_used,
     ) = row
     if not isinstance(thread_id, str) or not thread_id:
         return None
@@ -257,6 +260,7 @@ def _state_thread_from_row(row: tuple[object, ...]) -> _StateThread | None:
             cwd=_thread_cwd(cwd),
             source=_source_name(source),
             is_archived=_is_archived(archived, archived_at),
+            tokens_used=_tokens_used(tokens_used),
         ),
         rollout_path=rollout_path,
         is_subagent=_is_subagent_thread(thread_source, source),
@@ -295,6 +299,12 @@ def _source_name(source: object) -> str:
     return "unknown"
 
 
+def _tokens_used(value: object) -> int | None:
+    if not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
 def _merge_session_thread(
     codex_home: Path, thread: CodexThread, state_thread: _StateThread | None
 ) -> CodexThread:
@@ -307,6 +317,7 @@ def _merge_session_thread(
         is_archived=_state_thread_is_archived(codex_home, state_thread),
         cwd=thread.cwd or state_thread.thread.cwd,
         source=state_thread.thread.source,
+        tokens_used=state_thread.thread.tokens_used,
     )
 
 
