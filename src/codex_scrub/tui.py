@@ -131,7 +131,7 @@ class ScrubApp(App[None]):
     Screen {
         background: ansi_default;
         color: ansi_default;
-        padding: 1 1;
+        padding: 1 1 0 1;
     }
 
     #title {
@@ -150,6 +150,14 @@ class ScrubApp(App[None]):
     #thread-list {
         height: 1fr;
         background: transparent;
+        scrollbar-size-vertical: 1;
+        scrollbar-size-horizontal: 1;
+        scrollbar-background: ansi_default;
+        scrollbar-background-hover: ansi_default;
+        scrollbar-background-active: ansi_default;
+        scrollbar-color: ansi_bright_black;
+        scrollbar-color-hover: ansi_white;
+        scrollbar-color-active: ansi_white;
     }
 
     .date-header,
@@ -215,6 +223,10 @@ class ScrubApp(App[None]):
         padding: 0 1;
         color: ansi_bright_black;
         background: transparent;
+    }
+
+    #status {
+        margin-top: 1;
     }
 
     #help {
@@ -437,6 +449,27 @@ class ScrubApp(App[None]):
     def _refresh_thread_markers(self, highlighted_item: ListItem | None) -> None:
         for item in self.query(ThreadListItem):
             item.set_highlighted(item is highlighted_item)
+        self._keep_group_header_visible(highlighted_item)
+
+    def _keep_group_header_visible(self, highlighted_item: ListItem | None) -> None:
+        if not isinstance(highlighted_item, ThreadListItem):
+            return
+
+        thread_list = self.query_one("#thread-list", ListView)
+        items = list(thread_list.children)
+        try:
+            index = items.index(highlighted_item)
+        except ValueError:
+            return
+
+        if index == 0 or isinstance(items[index - 1], ThreadListItem):
+            return
+
+        thread_list.call_after_refresh(
+            thread_list.scroll_to_widget,
+            items[index - 1],
+            animate=False,
+        )
 
     def _clear_confirmation(self, update_status: bool = True) -> None:
         self.confirming_thread_id = None
