@@ -66,6 +66,12 @@ When upstream changes, search for concepts as well as files:
   watermark behavior.
 - `codex/codex-rs/core/src/config/mod.rs`: persisted `sqlite_home` config and
   runtime-only `CODEX_SQLITE_HOME` behavior.
+- `codex/codex-rs/rollout/src/recorder.rs`: rollout `session_meta` fields,
+  including `parent_thread_id`, source, and compression behavior.
+- `codex/codex-rs/rollout/src/list.rs`: file-backed thread list metadata,
+  including parent-thread summaries.
+- `codex/codex-rs/external-agent-sessions/src/ledger.rs`: imported external
+  session ledger format and imported thread IDs.
 
 These paths reflect the last checked submodule. If upstream moves code, keep the
 same exploration scope and update this anchor list after finding the new homes.
@@ -90,7 +96,8 @@ same exploration scope and update this anchor list after finding the new homes.
     artifacts, and scrubs SQLite.
   - `_related_thread_ids()` and `_related_state_thread_ids()`: expand the
     requested thread to subagent/child thread IDs using `thread_spawn_edges`
-    and rollout markers.
+    state `source` metadata, rollout `session_meta.parent_thread_id`, and
+    legacy rollout markers.
 - `src/codex_scrub/cleanup.py`
   - `scrub_sqlite_files()`: public SQLite scrub entry point.
   - `_sqlite_scrub_targets()`: enumerates DB files and their scrub plans.
@@ -105,6 +112,8 @@ same exploration scope and update this anchor list after finding the new homes.
   - `_scrub_memory_artifacts()`: prunes legacy markdown memory files.
   - `_rollout_trace_bundle_paths()`: finds trace bundles under
     `CODEX_ROLLOUT_TRACE_ROOT`.
+  - `_scrub_external_agent_import_ledger()`: prunes imported external-agent
+    session ledger records that mention any scrubbed thread ID.
 
 ## SQLite Tables Scrubbed
 
@@ -146,6 +155,12 @@ App DBs:
 - Broad `CODEX_HOME` filename scan: delete any file/symlink whose name contains
   a scrubbed thread ID. This covers `sessions/`, `archived_sessions/`, and any
   other Codex-home file that embeds the ID in its filename.
+- Related subagent discovery also reads plain rollout JSONL `session_meta`
+  records for `parent_thread_id` and thread-spawn `source` metadata. This is a
+  fallback for missing or stale `thread_spawn_edges`; compressed `.jsonl.zst`
+  rollouts still rely on SQLite edges or filename matches.
+- `external_agent_session_imports.json`: remove import ledger records whose
+  fields mention a scrubbed thread ID, including current `imported_thread_id`.
 - Legacy markdown memory files under `CODEX_HOME/memories`:
   - Delete `rollout_summaries/*.md` files that mention a scrubbed thread ID.
   - Prune matching sections from `raw_memories.md`.
@@ -163,14 +178,16 @@ App DBs:
 
 As of this checkpoint, upstream state defines:
 
-- Submodule commit: `cdde711fac`
+- Submodule commit: `a7dff90430`
 - `STATE_DB_FILENAME = "state_5.sqlite"`
 - `LOGS_DB_FILENAME = "logs_2.sqlite"`
 - `GOALS_DB_FILENAME = "goals_1.sqlite"`
 - `MEMORIES_DB_FILENAME = "memories_1.sqlite"`
 
 The main compatibility point is intentional: keep scrubbing old inline state
-tables even when upstream has split them into dedicated DBs.
+tables even when upstream has split them into dedicated DBs. The latest checked
+update did not add a new SQLite DB prefix or migration; the scrubber update was
+for rollout parent metadata and the external-agent import ledger.
 
 ## Update Rules
 

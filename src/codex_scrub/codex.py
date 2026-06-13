@@ -334,6 +334,7 @@ def _state_only_thread_is_zombie(thread: CodexThread) -> bool:
 def _related_thread_ids(codex_home: Path, thread_id: str) -> tuple[str, ...]:
     related_ids = {thread_id}
     db_home = sqlite_home(codex_home)
+    rollout_edges = _rollout_thread_parent_edges(codex_home)
 
     while True:
         discovered_ids = set(related_ids)
@@ -344,6 +345,12 @@ def _related_thread_ids(codex_home: Path, thread_id: str) -> tuple[str, ...]:
                 )
             except (OSError, sqlite3.Error):
                 continue
+
+        discovered_ids.update(
+            child_id
+            for parent_id, child_id in rollout_edges
+            if parent_id in related_ids
+        )
 
         if discovered_ids == related_ids:
             return tuple(sorted(related_ids))
@@ -377,14 +384,134 @@ def _related_state_thread_ids(
             f"FROM {quote_identifier('threads')}"
         ).fetchall()
 
-    return related_ids | {
-        thread_id
-        for thread_id, thread_source, source, rollout_path in rows
-        if isinstance(thread_id, str)
-        and thread_id not in parent_thread_ids
-        and _is_subagent_thread(thread_source, source)
-        and _subagent_references_parent(codex_home, rollout_path, parent_thread_ids)
-    }
+    for thread_id, thread_source, source, rollout_path in rows:
+        if not isinstance(thread_id, str) or thread_id in parent_thread_ids:
+            continue
+
+        if _thread_spawn_parent_thread_id(source) in parent_thread_ids:
+            related_ids.add(thread_id)
+            continue
+
+        if _is_subagent_thread(thread_source, source) and _subagent_references_parent(
+            codex_home, rollout_path, parent_thread_ids
+        ):
+            related_ids.add(thread_id)
+
+    return related_ids
+
+
+def _rollout_thread_parent_edges(codex_home: Path) -> tuple[tuple[str, str], ...]:
+    edges: set[tuple[str, str]] = set()
+    for path in _rollout_jsonl_paths(codex_home):
+        try:
+            edges.update(_rollout_file_thread_parent_edges(path))
+        except OSError:
+            continue
+    return tuple(sorted(edges))
+
+
+def _rollout_jsonl_paths(codex_home: Path) -> tuple[Path, ...]:
+    paths: set[Path] = set()
+    for directory_name in ("sessions", "archived_sessions"):
+        directory = codex_home / directory_name
+        if not directory.is_dir():
+            continue
+        paths.update(path for path in directory.rglob("*.jsonl") if is_filelike(path))
+    return tuple(sorted(paths))
+
+
+def _rollout_file_thread_parent_edges(path: Path) -> set[tuple[str, str]]:
+    edges: set[tuple[str, str]] = set()
+    with path.open(encoding="utf-8", errors="ignore") as file:
+        for line in file:
+            metadata = _rollout_session_meta(line)
+            if metadata is None:
+                continue
+
+            child_id = _string_value(metadata.get("id"))
+            parent_id = _string_value(
+                metadata.get("parent_thread_id")
+            ) or _string_value(metadata.get("parentThreadId"))
+            if parent_id is None:
+                parent_id = _thread_spawn_parent_thread_id(metadata.get("source"))
+            if child_id and parent_id and child_id != parent_id:
+                edges.add((parent_id, child_id))
+    return edges
+
+
+def _rollout_session_meta(line: str) -> dict[str, object] | None:
+    data = _json_dict(line)
+    if data.get("type") != "session_meta":
+        return None
+
+    if payload := _string_key_dict(data.get("payload")):
+        return payload
+
+    return data
+
+
+def _thread_spawn_parent_thread_id(value: object) -> str | None:
+    if isinstance(value, str):
+        return _thread_spawn_parent_thread_id_from_string(value)
+    if data := _string_key_dict(value):
+        return _thread_spawn_parent_thread_id_from_json(data)
+    return None
+
+
+def _thread_spawn_parent_thread_id_from_string(value: str) -> str | None:
+    if parent_id := _thread_spawn_parent_thread_id_from_legacy_string(value):
+        return parent_id
+
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    return _thread_spawn_parent_thread_id(parsed)
+
+
+def _thread_spawn_parent_thread_id_from_legacy_string(value: str) -> str | None:
+    marker = "subagent_thread_spawn_"
+    if not value.startswith(marker):
+        return None
+
+    parent_id, separator, _depth = value.removeprefix(marker).rpartition("_d")
+    return parent_id if separator and parent_id else None
+
+
+def _thread_spawn_parent_thread_id_from_json(value: dict[str, object]) -> str | None:
+    return (
+        _parent_thread_id_from_subagent_source(value.get("subagent"))
+        or _parent_thread_id_from_subagent_source(value.get("sub_agent"))
+        or _parent_thread_id_from_subagent_source(value.get("SubAgent"))
+        or _parent_thread_id_from_subagent_source(value)
+    )
+
+
+def _parent_thread_id_from_subagent_source(value: object) -> str | None:
+    data = _string_key_dict(value)
+    if data is None:
+        return None
+
+    spawn = (
+        _string_key_dict(data.get("thread_spawn"))
+        or _string_key_dict(data.get("threadSpawn"))
+        or _string_key_dict(data.get("ThreadSpawn"))
+        or data
+    )
+
+    return _string_value(spawn.get("parent_thread_id")) or _string_value(
+        spawn.get("parentThreadId")
+    )
+
+
+def _string_key_dict(value: object) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        return None
+    return {key: item for key, item in value.items() if isinstance(key, str)}
+
+
+def _string_value(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
 
 
 def _is_subagent_thread(thread_source: object, source: object) -> bool:

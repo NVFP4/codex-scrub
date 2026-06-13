@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sqlite3
@@ -39,6 +40,7 @@ GOAL_DELETE_TABLES = (("thread_goals", "thread_id"),)
 LOG_DELETE_TABLES = (("logs", "thread_id"),)
 MEMORY_DELETE_TABLES = (("stage1_outputs", "thread_id"), ("jobs", "job_key"))
 APP_DELETE_TABLES = (("automation_runs", "thread_id"), ("inbox_items", "thread_id"))
+EXTERNAL_AGENT_IMPORT_LEDGER = "external_agent_session_imports.json"
 
 
 @dataclass(frozen=True)
@@ -76,6 +78,7 @@ def delete_thread_artifacts(codex_home: Path, thread_ids: Iterable[str]) -> list
     thread_ids = tuple(thread_ids)
     paths = set(_thread_file_artifact_paths(codex_home, thread_ids))
     paths.update(_scrub_memory_artifacts(codex_home, thread_ids))
+    _scrub_external_agent_import_ledger(codex_home, thread_ids)
 
     return _delete_paths(paths)
 
@@ -289,6 +292,50 @@ def _scrub_memory_artifacts(
     if memory_changed:
         paths.extend(_memory_git_history_paths(memory_root))
     return paths
+
+
+def _scrub_external_agent_import_ledger(
+    codex_home: Path, thread_ids: tuple[str, ...]
+) -> bool:
+    if not thread_ids:
+        return False
+
+    path = codex_home / EXTERNAL_AGENT_IMPORT_LEDGER
+    if not is_filelike(path):
+        return False
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+
+    if not isinstance(data, dict) or not isinstance(data.get("records"), list):
+        return False
+
+    records = data["records"]
+    kept_records = [
+        record
+        for record in records
+        if not _json_value_mentions_any_marker(record, thread_ids)
+    ]
+    if len(kept_records) == len(records):
+        return False
+
+    data["records"] = kept_records
+    write_text_atomically(path, json.dumps(data, indent=2) + "\n")
+    return True
+
+
+def _json_value_mentions_any_marker(value: object, markers: tuple[str, ...]) -> bool:
+    if isinstance(value, str):
+        return any(marker in value for marker in markers)
+    if isinstance(value, dict):
+        return any(
+            _json_value_mentions_any_marker(item, markers) for item in value.values()
+        )
+    if isinstance(value, list):
+        return any(_json_value_mentions_any_marker(item, markers) for item in value)
+    return False
 
 
 def _memory_git_history_paths(memory_root: Path) -> list[Path]:
